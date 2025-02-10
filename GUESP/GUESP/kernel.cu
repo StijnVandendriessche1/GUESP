@@ -10,10 +10,6 @@
 #include <queue>
 
 
-#define DEBUG false
-#define DBTID 9
-
-
 #define MAX_COLORS 10
 #define NUM_NODES 184
 #define NUM_EDGES 1430
@@ -40,7 +36,7 @@ __constant__ int d_adjList[2 * NUM_EDGES];
 __constant__ int d_adjListStartIndices[2 + NUM_NODES];
 __constant__ int d_cantorPairs[NUM_EDGES];
 __constant__ int d_weights[NUM_EDGES];
-int* d_solution; //184 ints for the coloring
+int* d_solution; //ints for the coloring
 int* d_score; //one int for the score
 Candidate* d_globalCandidates;
 
@@ -63,8 +59,9 @@ __device__ inline int cantorPairGPU(int a, int b) {
 }
 
 // Binary search for a key in constant memory
-__device__ int binarySearchConstant(int key, int size) {
-    int left = 0, right = size - 1;
+__device__ int binarySearchConstant(int key) 
+{
+    int left = 0, right = NUM_EDGES - 1;
 
     while (left <= right) {
         int mid = left + (right - left) / 2; // Avoid overflow
@@ -97,32 +94,13 @@ __device__ int deltaMoveExam(int tid, int* d_solution)
     int startIdx = d_adjListStartIndices[pos + 1];
     int endIdx = d_adjListStartIndices[pos + 2];
 
-    if (DEBUG)
-    {
-        if (tid == DBTID)
-        {
-            printf("TID: %d\n", tid);
-            printf("pos: %d\tval: %d\n", pos, val);
-            printf("old: %d\n", old);
-            printf("indeces: %d, %d\n", startIdx, endIdx);
-            printf("neighbors: \n");
-        }
-    }
-
     // Iterate over neighbors and calculate P_0 and P_0'
     for (int i = startIdx; i < endIdx; i++)
     {
         int neighbor = d_adjList[i];
         int neighborColor = d_solution[neighbor-1];
         if (val == neighborColor) return 1;
-        int weight = binarySearchConstant(cantorPairGPU(pos+1, neighbor), NUM_EDGES);
-        if (DEBUG)
-        {
-            if (tid == DBTID)
-            {
-                printf("%d, color: %d, weight: %d\n", neighbor, neighborColor, weight);
-            }
-        }
+        int weight = binarySearchConstant(cantorPairGPU(pos+1, neighbor));
 
         // Calculate P_0 (Penalty before move)
         if (abs(old - neighborColor) < 6) {
@@ -142,16 +120,69 @@ __device__ int deltaMoveExam(int tid, int* d_solution)
 }
 
 // Delta cost function for swap exam
-__device__ int swapExams(int tid, int* d_solution)
+__device__ int deltaSwapExam(int tid, int* d_solution)
 {
-    int i = tid+1;
-    return 100;
+    int e1 = NUM_NODES - 2 - static_cast<int>((sqrt(8.0 * (SWAP_SIZE - tid - 1) + 1.0) - 1.0) / 2.0);
+    int e2 = tid - e1 * (NUM_NODES - 1) + ((e1 * (e1 + 1)) / 2) + 1;
+
+    int orig1 = d_solution[e1];
+    int orig2 = d_solution[e2];
+
+    if (d_solution[e1] == d_solution[e2]) return 1; //first precondition (for steepest descent, any positive value works)
+    
+    // get indeces for adjacencylist
+    int startIdxE1 = d_adjListStartIndices[e1 + 1];
+    int startIdxE2 = d_adjListStartIndices[e2 + 1];
+    int endIdxE1 = d_adjListStartIndices[e1 + 2];
+    int endIdxE2 = d_adjListStartIndices[e2 + 2];
+
+    int P_0 = 0;
+    int P_0_prime = 0;
+
+    for (int i = startIdxE1; i < endIdxE1; i++)
+    {
+        int neighbor = d_adjList[i];
+        if (neighbor == e2 + 1) continue; //skip over the common edge
+        int weight = binarySearchConstant(cantorPairGPU(e1 + 1, neighbor));
+        int neighborColor = d_solution[neighbor - 1];
+        int oldDif = abs(orig1 - neighborColor);
+        int newDif = abs(orig2 - neighborColor);
+        if (oldDif < 6) P_0 += weight * (1 << (5 - oldDif));
+        if (newDif == 0) return 1; //precondition 2
+        if (newDif < 6) P_0_prime += weight * (1 << (5 - newDif));
+    }
+
+    for (int i = startIdxE2; i < endIdxE2; i++)
+    {
+        int neighbor = d_adjList[i];
+        if (neighbor == e1 + 1) continue; //skip over the common edge
+        int weight = binarySearchConstant(cantorPairGPU(e2 + 1, neighbor));
+        int neighborColor = d_solution[neighbor - 1];
+        int oldDif = abs(orig2 - neighborColor);
+        int newDif = abs(orig1 - neighborColor);
+        if (oldDif < 6) P_0 += weight * (1 << (5 - oldDif));
+        if (newDif == 0) return 1; //precondition 2
+        if (newDif < 6) P_0_prime += weight * (1 << (5 - newDif));
+    }
+    //printf("swap\te1: %d\te2: %d\t");
+    return P_0_prime - P_0;
 }
 
 // simple comparisson function between candidates
 __device__ Candidate minCandidate(const Candidate& a, const Candidate& b) 
 {
     return (a.score <= b.score) ? a : b;
+}
+
+// print function for (candiate) solutions
+__device__ void printSolutionGPU(int* d_solution)
+{
+    printf("[");
+    for (int i = 0; i < NUM_NODES-1; i++)
+    {
+        printf("%d, ", d_solution[i]);
+    }
+    printf("%d]\n", d_solution[NUM_NODES-1]);
 }
 
 
@@ -175,16 +206,9 @@ __global__ void optimizeSolutionKernel(int* d_solution, int* d_score, Candidate*
         {
             candidate = deltaMoveExam(tid, d_solution) + *d_score;
             candidateMove = true;
-            if (DEBUG)
-            {
-                if (tid == DBTID)
-                {
-                    printf("score: %d\n", candidate);
-                }
-            }
         }
         else {
-            candidate = swapExams(tid, d_solution) + *d_score;
+            candidate = deltaSwapExam(tid-MOVE_SIZE, d_solution) + *d_score;
             candidateMove = false;
         }
         if (candidate < localMin) {
@@ -221,47 +245,58 @@ __global__ void optimizeSolutionKernel(int* d_solution, int* d_score, Candidate*
     if (lane == 0) 
     {
         d_globalCandidates[blockIdx.x] = sdata[0];
+        //printf("%d\n", sdata[0]);
     }
 }
 
-// kernel to reduce the minimum values found by all blocks to one overall minimum and put it at d_globalCandidates[0]
-__global__ void reduce(Candidate* d_globalCandidates, int* d_solution, int* d_score)
-{
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+// Kernel to reduce the minimum values found by all blocks to one overall minimum
+__global__ void reduce(Candidate* d_globalCandidates, int* d_solution, int* d_score) {
+    int tid = threadIdx.x;  // Local thread index
     __shared__ Candidate sdata[64];
-    // Load data from global memory into shared memory
-    sdata[idx] = d_globalCandidates[idx];
+
+    // Initialize shared memory: First 48 threads copy real values, others get MAX_INT
+    if (tid < 48) {
+        sdata[tid] = d_globalCandidates[tid];
+    }
+    else {
+        sdata[tid].score = INT_MAX;  // Large value to avoid affecting the reduction
+    }
     __syncthreads();
-    // Perform reduction in shared memory
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (idx < s) {
-            sdata[idx] = minCandidate(sdata[idx], sdata[idx + s]);
+
+    // Perform reduction in shared memory (power of two: 64 -> 32 -> 16 -> 8 -> 4 -> 2 -> 1)
+    for (int s = 32; s > 0; s >>= 1) {  // Start at 32 since we have 64 threads
+        if (tid < s) {
+            sdata[tid] = minCandidate(sdata[tid], sdata[tid + s]);
         }
         __syncthreads();
     }
+
     // Write the result from block 0 to global memory
-    if (idx == 0) 
-    {
+    if (tid == 0) {
         d_globalCandidates[0] = sdata[0];
         Candidate best = sdata[0];
-        if (best.move)
-        {
+
+        if (best.move) {
             int pos = best.op / (MAX_COLORS - 1);
             int val = (best.op % (MAX_COLORS - 1) + d_solution[pos] + 1) % MAX_COLORS;
             d_solution[pos] = val;
             *d_score = best.score;
         }
-        else
+        else 
         {
-            //TODO execute the swap
+            int i = best.op - MOVE_SIZE;
+            int e1 = NUM_NODES - 2 - static_cast<int>((sqrt(8.0 * (SWAP_SIZE - i - 1) + 1.0) - 1.0) / 2.0);
+            int e2 = i - e1 * (NUM_NODES - 1) + ((e1 * (e1 + 1)) / 2) + 1;
+
+            //printf("swapping nodes %d & %d\n", e1, e2);
+
+            int orig1 = d_solution[e1];
+            d_solution[e1] = d_solution[e2];
+            d_solution[e2] = orig1;
+            *d_score = best.score;
         }
+
         printf("iteration completed, current score: %d\n", best.score);
-        /*printf("[");
-        for (int i = 0; i < NUM_NODES; i++)
-        {
-            printf("%d, ", d_solution[i]);
-        }
-        printf("]");*/
     }
 }
 
@@ -353,10 +388,6 @@ void optimizeSolutionOnGPU(int* d_solution, int* d_score, Candidate* d_globalCan
     //allocate 48 Candidate structs for the reductions step in the algorithm
     cudaMalloc((void**)&d_globalCandidates, 48 * sizeof(Candidate));
 
-    //given the dimensions of the NVIDIA GeForce RTX 2080 SUPER Max-Q 48 blocks of 64 threads is the best configuration
-    int threadsPerBlock = 64;
-    int blocksPerGrid = 48;
-
     int h_oldScore = cost;
     int h_newScore = cost;
     int count = 0;
@@ -364,12 +395,14 @@ void optimizeSolutionOnGPU(int* d_solution, int* d_score, Candidate* d_globalCan
     do {
         h_oldScore = h_newScore;
         // Launch kernel to find the best candidate
-        optimizeSolutionKernel << <blocksPerGrid, threadsPerBlock >> > (d_solution, d_score, d_globalCandidates);
+        //given the dimensions of the NVIDIA GeForce RTX 2080 SUPER Max-Q 48 blocks of 64 threads is the best configuration
+        optimizeSolutionKernel << <NUM_BLOCKS, NUM_CORES / NUM_BLOCKS >> > (d_solution, d_score, d_globalCandidates);
         cudaDeviceSynchronize();
 
         // Reduce and apply the best move
-        reduce << <1, blocksPerGrid >> > (d_globalCandidates, d_solution, d_score);
+        reduce << <1, NUM_BLOCKS >> > (d_globalCandidates, d_solution, d_score);
         cudaDeviceSynchronize();
+
 
         // Copy updated score from device to host
         cudaMemcpy(&h_newScore, d_score, sizeof(int), cudaMemcpyDeviceToHost);
@@ -646,13 +679,15 @@ double calculateCost(const vector<int>& coloring, const unordered_map<int, int>&
     return totalPenalty;
 }
 
-
-void printSolution(vector<int> coloring, int numNodes) {
+// print the solution on CPU
+void printSolution(vector<int> coloring) {
     // Print coloring result
-    cout << "Graph Coloring:\n";
-    for (int i = 0; i < numNodes; ++i) {
-        cout << "Node " << i + 1 << ": Color " << coloring[i] << endl;
+    printf("[");
+    for (int i = 0; i < NUM_NODES - 1; i++)
+    {
+        printf("%d, ", coloring[i]);
     }
+    printf("%d]\n", coloring[NUM_NODES - 1]);
 }
 
 
@@ -724,13 +759,7 @@ int main()
     //FINAL EVALUATION
     // Check score
     //double newCost = calculateCost(solution, edgeMap);
-    
-    printf("[");
-    for (int i = 0; i < NUM_NODES; i++)
-    {
-        printf("%d, ", solution[i]);
-    }
-    printf("]");
+    printSolution(solution);
 
     return 0;
 }
@@ -945,7 +974,7 @@ __global__ void printGraphWithWeights(int numNodes) {
             offset = tempOffset;
 
             // Get edge weight using Cantor pairing and binary search
-            int weight = binarySearchConstant(cantorPairGPU(idx, d_adjList[i]), NUM_EDGES);
+            int weight = binarySearchConstant(cantorPairGPU(idx, d_adjList[i]));
 
             // Append " (w=" part
             outputBuffer[offset++] = ' ';
