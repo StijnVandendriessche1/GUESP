@@ -1,0 +1,988 @@
+﻿#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+#include <stdio.h>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <queue>
+#include <chrono>
+#include <set>
+
+//ute
+#define MAX_COLORS 10
+#define NUM_NODES 184
+#define NUM_EDGES 1430
+
+//lse
+/*
+#define MAX_COLORS 18
+#define NUM_NODES 381
+#define NUM_EDGES 4531
+*/
+
+//yor
+/*
+#define MAX_COLORS 21
+#define NUM_NODES 181
+#define NUM_EDGES 4706
+*/
+
+//uta
+/*
+#define MAX_COLORS 35
+#define NUM_NODES 622
+#define NUM_EDGES 24249
+*/
+
+//tre
+/*
+#define MAX_COLORS 23
+#define NUM_NODES 261
+#define NUM_EDGES 6131
+*/
+
+//EAR
+/*
+#define MAX_COLORS 24
+#define NUM_NODES 190
+#define NUM_EDGES 4793
+*/
+
+//hec
+/*
+#define MAX_COLORS 18
+#define NUM_NODES 81
+#define NUM_EDGES 1363
+*/
+
+//KFU
+/*
+#define MAX_COLORS 20
+#define NUM_NODES 461
+#define NUM_EDGES 5893
+*/
+
+//pur
+/*
+#define MAX_COLORS 42
+#define NUM_NODES 2419
+#define NUM_EDGES 86261
+*/
+
+//rye
+/*
+#define MAX_COLORS 23
+#define NUM_NODES 486
+#define NUM_EDGES 8872
+*/
+
+//sta
+/*
+#define MAX_COLORS 12
+#define NUM_NODES 139
+#define NUM_EDGES 1381
+*/
+
+//car92
+/*
+#define MAX_COLORS 32
+#define NUM_NODES 543
+#define NUM_EDGES 20305
+*/
+
+//car91
+/*
+#define MAX_COLORS 35
+#define NUM_NODES 682
+#define NUM_EDGES 29814
+*/
+
+#define NUM_CORES 3072
+#define NUM_BLOCKS 48
+
+
+#define MOVE_SIZE ((MAX_COLORS - 1) * NUM_NODES)
+#define SWAP_SIZE ((NUM_NODES * (NUM_NODES - 1)) / 2)
+
+
+using namespace std;
+
+
+//struct to make reduction (minimizing) easier
+struct Candidate {
+    int score;   // the candidate score (to be minimized)
+    int op;      // the operation id that produced that score
+    bool move;   // true if it came from a move, false if from a swap
+};
+
+// Define constant memory on GPU for adjacency list, and edge map, global memory for solution and score
+int* d_adjList;
+int* d_adjListStartIndices;
+int* d_cantorPairs;
+int* d_weights;
+int* d_solution; //ints for the coloring
+int* d_score; //one int for the score
+Candidate* d_globalCandidates;
+
+
+
+
+
+// ---- ---- ---- ---- GPU DEVICE FUNCTIONS
+
+// Cantor pairing function for GPU
+__device__ inline int cantorPairGPU(int a, int b) {
+    // Ensure a >= b for consistency
+    if (a < b) {
+        int temp = a;
+        a = b;
+        b = temp;
+    }
+    int sum = a + b;
+    return (sum * (sum + 1)) / 2 + b;
+}
+
+// Binary search for a key in constant memory
+__device__ int binarySearch(int key, int* d_cantorPairs, int* d_weights)
+{
+    int left = 0, right = NUM_EDGES - 1;
+
+    while (left <= right) {
+        int mid = left + (right - left) / 2; // Avoid overflow
+
+        if (d_cantorPairs[mid] == key)
+            return d_weights[mid];  // Found key, return value
+
+        if (d_cantorPairs[mid] < key)
+            left = mid + 1;
+        else
+            right = mid - 1;
+    }
+
+    return -1; // Key not found
+}
+
+// Delta cost function for move exam
+__device__ int deltaMoveExam(int tid, int* d_solution, int* d_adjList, int* d_adjListStartIndices, int* d_cantorPairs, int* d_weights)
+{
+    int pos = tid / (MAX_COLORS - 1);
+    int val = (tid % (MAX_COLORS - 1) + d_solution[pos] + 1) % MAX_COLORS;
+    int old = d_solution[pos];
+
+    // Compute the delta cost of moving examID from oldColor to newColor
+    int deltaCost = 0;
+    int P_0 = 0; //Partial penalty for current solution
+    int P_0_prime = 0; //Partial penalty for candidate solution
+
+    // Retrieve adjacency list range for this node
+    int startIdx = d_adjListStartIndices[pos + 1];
+    int endIdx = d_adjListStartIndices[pos + 2];
+
+    // Iterate over neighbors and calculate P_0 and P_0'
+    for (int i = startIdx; i < endIdx; i++)
+    {
+        int neighbor = d_adjList[i];
+        int neighborColor = d_solution[neighbor - 1];
+        if (val == neighborColor) return 1;
+        int weight = binarySearch(cantorPairGPU(pos + 1, neighbor), d_cantorPairs, d_weights);
+
+        // Calculate P_0 (Penalty before move)
+        if (abs(old - neighborColor) < 6) {
+            P_0 += weight * (1 << (5 - abs(old - neighborColor))); // 2^(5-dist)
+        }
+
+        // Calculate P_0' (Penalty after move)
+        if (abs(val - neighborColor) < 6) {
+            P_0_prime += weight * (1 << (5 - abs(val - neighborColor))); // 2^(5-dist)
+        }
+    }
+
+    // Calculate Delta P_move (Change in penalty)
+    deltaCost = P_0_prime - P_0;
+
+    return deltaCost;  // Return change in cost for this move
+}
+
+// Delta cost function for swap exam
+__device__ int deltaSwapExam(int tid, int* d_solution, int* d_adjList, int* d_adjListStartIndices, int* d_cantorPairs, int* d_weights)
+{
+    int e1 = NUM_NODES - 2 - static_cast<int>((sqrt(8.0 * (SWAP_SIZE - tid - 1) + 1.0) - 1.0) / 2.0);
+    int e2 = tid - e1 * (NUM_NODES - 1) + ((e1 * (e1 + 1)) / 2) + 1;
+
+    int orig1 = d_solution[e1];
+    int orig2 = d_solution[e2];
+
+    if (d_solution[e1] == d_solution[e2]) return 1; //first precondition (for steepest descent, any positive value works)
+
+    // get indeces for adjacencylist
+    int startIdxE1 = d_adjListStartIndices[e1 + 1];
+    int startIdxE2 = d_adjListStartIndices[e2 + 1];
+    int endIdxE1 = d_adjListStartIndices[e1 + 2];
+    int endIdxE2 = d_adjListStartIndices[e2 + 2];
+
+    int P_0 = 0;
+    int P_0_prime = 0;
+
+    for (int i = startIdxE1; i < endIdxE1; i++)
+    {
+        int neighbor = d_adjList[i];
+        if (neighbor == e2 + 1) continue; //skip over the common edge
+        int weight = binarySearch(cantorPairGPU(e1 + 1, neighbor), d_cantorPairs, d_weights);
+        int neighborColor = d_solution[neighbor - 1];
+        int oldDif = abs(orig1 - neighborColor);
+        int newDif = abs(orig2 - neighborColor);
+        if (oldDif < 6) P_0 += weight * (1 << (5 - oldDif));
+        if (newDif == 0) return 1; //precondition 2
+        if (newDif < 6) P_0_prime += weight * (1 << (5 - newDif));
+    }
+
+    for (int i = startIdxE2; i < endIdxE2; i++)
+    {
+        int neighbor = d_adjList[i];
+        if (neighbor == e1 + 1) continue; //skip over the common edge
+        int weight = binarySearch(cantorPairGPU(e2 + 1, neighbor), d_cantorPairs, d_weights);
+        int neighborColor = d_solution[neighbor - 1];
+        int oldDif = abs(orig2 - neighborColor);
+        int newDif = abs(orig1 - neighborColor);
+        if (oldDif < 6) P_0 += weight * (1 << (5 - oldDif));
+        if (newDif == 0) return 1; //precondition 2
+        if (newDif < 6) P_0_prime += weight * (1 << (5 - newDif));
+    }
+    //printf("swap\te1: %d\te2: %d\t");
+    return P_0_prime - P_0;
+}
+
+// simple comparisson function between candidates
+__device__ Candidate minCandidate(const Candidate& a, const Candidate& b)
+{
+    return (a.score <= b.score) ? a : b;
+}
+
+// print function for (candiate) solutions
+__device__ void printSolutionGPU(int* d_solution)
+{
+    printf("[");
+    for (int i = 0; i < NUM_NODES - 1; i++)
+    {
+        printf("%d, ", d_solution[i]);
+    }
+    printf("%d]\n", d_solution[NUM_NODES - 1]);
+}
+
+
+
+
+
+// ---- ---- ---- ---- GPU MAIN KERNELS
+
+// kernel for optimizing the given initial solution
+__global__ void explore(int* d_solution, int* d_score, Candidate* d_globalCandidates, int* d_adjList, int* d_adjListStartIndices, int* d_cantorPairs, int* d_weights)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x; // Compute thread index
+    int localMin = *d_score + INT_MAX / 2 + 1;  // initial value is the current score
+    int bestOp = -1;          // candidate operation id
+    bool bestMove = true;     // whether it is a move or a swap
+
+    while (tid < MOVE_SIZE + SWAP_SIZE) {
+        int candidate;
+        bool candidateMove;
+        if (tid < MOVE_SIZE)
+        {
+            candidate = deltaMoveExam(tid, d_solution, d_adjList, d_adjListStartIndices, d_cantorPairs, d_weights) + *d_score;
+            candidateMove = true;
+        }
+        else {
+            candidate = deltaSwapExam(tid - MOVE_SIZE, d_solution, d_adjList, d_adjListStartIndices, d_cantorPairs, d_weights) + *d_score;
+            candidateMove = false;
+        }
+        if (candidate < localMin) {
+            localMin = candidate;
+            bestOp = tid;
+            bestMove = candidateMove;
+        }
+        tid += 3072;
+    }
+
+    // Pack the thread’s best candidate into a structure.
+    Candidate myCand;
+    myCand.score = localMin;
+    myCand.op = bestOp;
+    myCand.move = bestMove;
+
+    //--------------------------------------------------------------------------
+    // Block-level reduction using shared memory.
+    // We assume blockDim.x is 64 (as you set) so we can declare a fixed-size shared array.
+    __shared__ Candidate sdata[64];
+    int lane = threadIdx.x;
+    sdata[lane] = myCand;
+    __syncthreads();
+
+    // Reduce the candidates in shared memory.
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (lane < s) {
+            sdata[lane] = minCandidate(sdata[lane], sdata[lane + s]);
+        }
+        __syncthreads();
+    }
+
+    // Copy the minima from the blocks to global memory
+    if (lane == 0)
+    {
+        d_globalCandidates[blockIdx.x] = sdata[0];
+        //printf("%d\n", sdata[0]);
+    }
+}
+
+// Kernel to reduce the minimum values found by all blocks to one overall minimum
+__global__ void reduce(Candidate* d_globalCandidates, int* d_solution, int* d_score) {
+    int tid = threadIdx.x;  // Local thread index
+    __shared__ Candidate sdata[64];
+
+    // Initialize shared memory: First 48 threads copy real values, others get MAX_INT
+    if (tid < 48) {
+        sdata[tid] = d_globalCandidates[tid];
+    }
+    else {
+        sdata[tid].score = INT_MAX;  // Large value to avoid affecting the reduction
+    }
+    __syncthreads();
+
+    // Perform reduction in shared memory (power of two: 64 -> 32 -> 16 -> 8 -> 4 -> 2 -> 1)
+    for (int s = 32; s > 0; s >>= 1) {  // Start at 32 since we have 64 threads
+        if (tid < s) {
+            sdata[tid] = minCandidate(sdata[tid], sdata[tid + s]);
+        }
+        __syncthreads();
+    }
+
+    // Write the result from block 0 to global memory
+    if (tid == 0) {
+        d_globalCandidates[0] = sdata[0];
+        Candidate best = sdata[0];
+        //printf("Candidate: %d %d %d\n", best.move, best.op, best.score);
+
+        if (best.score < *d_score)
+        {
+            if (best.move) {
+                int pos = best.op / (MAX_COLORS - 1);
+                int val = (best.op % (MAX_COLORS - 1) + d_solution[pos] + 1) % MAX_COLORS;
+                d_solution[pos] = val;
+                *d_score = best.score;
+            }
+            else
+            {
+                int i = best.op - MOVE_SIZE;
+                int e1 = NUM_NODES - 2 - static_cast<int>((sqrt(8.0 * (SWAP_SIZE - i - 1) + 1.0) - 1.0) / 2.0);
+                int e2 = i - e1 * (NUM_NODES - 1) + ((e1 * (e1 + 1)) / 2) + 1;
+
+                //printf("swapping nodes %d & %d\n", e1, e2);
+
+                int orig1 = d_solution[e1];
+                d_solution[e1] = d_solution[e2];
+                d_solution[e2] = orig1;
+                *d_score = best.score;
+            }
+        }
+
+        printf("iteration completed, current cost: %d\n", best.score);
+    }
+}
+
+
+
+
+
+// ---- ---- ---- ---- COPY DATA TO AND FROM GPU + calling kernels
+
+// Function to copy adjacency list data to GPU constant memory
+//TODO: check if adjacencyList fit's in constant memory, if not it can be put in global memory
+void copyAdjacencyListToGPU(const vector<int>& adjList, const vector<int>& adjListStartIndices) {
+    // Copy adjacency list data to GPU constant memory
+    cudaMalloc(&d_adjList, adjList.size() * sizeof(int));
+    cudaError_t err = cudaMemcpy(d_adjList, adjList.data(), adjList.size() * sizeof(int), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        printf("CUDA Error AL: %s\n", cudaGetErrorString(err));
+    }
+    cudaMalloc(&d_adjListStartIndices, adjListStartIndices.size() * sizeof(int));
+    err = cudaMemcpy(d_adjListStartIndices, adjListStartIndices.data(), adjListStartIndices.size() * sizeof(int), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        printf("CUDA Error ALI: %s\n", cudaGetErrorString(err));
+    }
+}
+
+// Function to copy sorted key-value pairs to GPU (constant memory)
+//TODO: check if edges fit's in constant memory, if not it can be put in global memory
+void copySortedPairsToGPU(const vector<int>& keys, const vector<int>& values) {
+    // Ensure the array size is within limits
+    size_t size = keys.size() * sizeof(int);
+
+    // Copy sorted keys and values to constant memory
+    cudaMalloc(&d_cantorPairs, keys.size() * sizeof(int));
+    cudaError_t err = cudaMemcpy(d_cantorPairs, keys.data(), keys.size() * sizeof(int), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        printf("CUDA Error CP: %s\n", cudaGetErrorString(err));
+    }
+    cudaMalloc(&d_weights, values.size() * sizeof(int));
+    err =  cudaMemcpy(d_weights, values.data(), values.size() * sizeof(int), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        printf("CUDA Error W: %s\n", cudaGetErrorString(err));
+    }
+}
+
+// Function to copy edge map to GPU using sorted keys for binary search
+void copyEdgeMapToGPU(unordered_map<int, int> edgeMap)
+{
+    vector<pair<int, int>> pairs(edgeMap.begin(), edgeMap.end()); // Convert map to vector of pairs
+
+    // Sort pairs by keys
+    sort(pairs.begin(), pairs.end(), [](const pair<int, int>& a, const pair<int, int>& b) {
+        return a.first < b.first;
+        });
+
+    // Separate keys and values into separate vectors
+    vector<int> keys, values;
+    for (const auto& p : pairs) {
+        keys.push_back(p.first);
+        values.push_back(p.second);
+    }
+
+    // Copy sorted arrays to GPU
+    copySortedPairsToGPU(keys, values);
+}
+
+// Function to copy initial solution to GPU constant memory
+void copySolutionToGPU(const vector<int>& coloring) {
+    cudaMalloc((void**)&d_solution, coloring.size() * sizeof(int));
+    cudaError_t err = cudaMemcpy(d_solution, coloring.data(), coloring.size() * sizeof(int), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        printf("CUDA Error SOL: %s\n", cudaGetErrorString(err));
+    }
+}
+
+// Function to copy initial score to GPU constant memory
+void copyCostToGPU(const int& score) {
+    cudaMalloc((void**)&d_score, sizeof(int));
+    cudaError_t err = cudaMemcpy(d_score, &score, sizeof(int), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        printf("CUDA Error COST: %s\n", cudaGetErrorString(err));
+    }
+}
+
+vector<int> copySolutionToCpu(int* d_solution)
+{
+    vector<int> h_solution(NUM_NODES);
+    cudaMemcpy(h_solution.data(), d_solution, NUM_NODES * sizeof(int), cudaMemcpyDeviceToHost);
+    return h_solution;
+}
+
+void freeMemoryGPU(int* d_adjList, int* d_adjListStartIndices, int* d_cantorPairs, int* d_weights, int* d_solution, int* d_score)
+{
+    cudaFree(d_adjList);
+    cudaFree(d_adjListStartIndices);
+    cudaFree(d_cantorPairs);
+    cudaFree(d_weights);
+    cudaFree(d_solution);
+    cudaFree(d_score);
+    //cudaFree(d_globalCandidates);
+}
+
+// Function for calling the main GPU kernel
+void optimizeSolutionOnGPU(int* d_solution, int* d_score, Candidate* d_globalCandidates, int cost)
+{
+    //allocate 48 Candidate structs for the reductions step in the algorithm
+    cudaMalloc((void**)&d_globalCandidates, 48 * sizeof(Candidate));
+
+    int h_oldScore = cost;
+    int h_newScore = cost;
+    int count = 0;
+    int stagnantCount = 0;
+
+    do {
+        h_oldScore = h_newScore;
+        // Launch kernel to find the best candidate
+        //given the dimensions of the NVIDIA GeForce RTX 2080 SUPER Max-Q 48 blocks of 64 threads is the best configuration
+        explore << <NUM_BLOCKS, NUM_CORES / NUM_BLOCKS >> > (d_solution, d_score, d_globalCandidates, d_adjList, d_adjListStartIndices, d_cantorPairs, d_weights);
+
+        cudaDeviceSynchronize();
+
+        // Reduce and apply the best move
+        reduce << <1, NUM_BLOCKS >> > (d_globalCandidates, d_solution, d_score);
+        cudaDeviceSynchronize();
+
+
+        // Copy updated score from device to host
+        cudaMemcpy(&h_newScore, d_score, sizeof(int), cudaMemcpyDeviceToHost);
+        //printf("iteration completed, current cost: %d\n", h_newScore);
+        count++;
+        if (h_newScore == h_oldScore)
+        {
+            stagnantCount++;
+        }
+        else
+        {
+            stagnantCount = 0;
+        }
+    } while (h_newScore < h_oldScore || stagnantCount < 10);
+
+    printf("Local optimal solution found after exploring %d neighbors\t\tscore: %d\n", count * (MOVE_SIZE + SWAP_SIZE), h_newScore);
+
+    /*// Launch kernel
+    optimizeSolutionKernel << <blocksPerGrid, threadsPerBlock >> > (d_solution, d_score, d_globalCandidates);
+    cudaDeviceSynchronize();
+    reduce << <1, NUM_BLOCKS >> > (d_globalCandidates, d_solution, d_score);
+    cudaDeviceSynchronize();*/
+    //TODO: copy element zero from d_globalCandidates back and check if the score has changed, if so reïterate over both kernels, if not -> done
+}
+
+
+
+
+
+// ---- ---- ---- ---- READ IN DATA FROM DATASETS
+
+// Function to read the .crs file
+unordered_map<int, int> readCrsFile(const string& filename, int& maxExamID) {
+    unordered_map<int, int> exams;
+    ifstream file(filename);
+
+    if (!file) {
+        cerr << "Error: Could not open " << filename << endl;
+        exit(1);
+    }
+
+    int examID, numStudents;
+    maxExamID = 0;
+    while (file >> examID >> numStudents) {
+        exams[examID] = numStudents;
+        maxExamID = max(maxExamID, examID); // Track max exam ID
+    }
+
+    file.close();
+    return exams;
+}
+
+// Function to read the .stu file
+vector<vector<int>> readStuFile(const string& filename) {
+    vector<vector<int>> studentEnrollments;
+    ifstream file(filename);
+
+    if (!file) {
+        cerr << "Error: Could not open " << filename << endl;
+        exit(1);
+    }
+
+    string line;
+    while (getline(file, line)) {
+        vector<int> exams;
+        stringstream ss(line);
+        int examID;
+
+        while (ss >> examID) {
+            exams.push_back(examID);
+        }
+
+        studentEnrollments.push_back(exams);
+    }
+
+    file.close();
+    return studentEnrollments;
+}
+
+
+
+
+
+// ---- ---- ---- ---- CREATE GRAPH DATA STRUCTURES AND RELEVANT FUNCTIONS
+
+// Function to create an adjacency list
+void createAdjacencyList(const vector<vector<int>>& studentEnrollments, int max, vector<int>& adjList, vector<int>& startIndeces)
+{
+    unordered_map<int, unordered_set<int>> adjacencyList; //temp adj list
+
+    for (const auto& enrolledExams : studentEnrollments) {
+        // Create a connection between all pairs of exams in this student's enrollment
+        for (size_t i = 0; i < enrolledExams.size(); ++i) {
+            for (size_t j = i + 1; j < enrolledExams.size(); ++j) {
+                int exam1 = enrolledExams[i];
+                int exam2 = enrolledExams[j];
+
+                adjacencyList[exam1].insert(exam2);
+                adjacencyList[exam2].insert(exam1);
+            }
+        }
+    }
+
+    // Flatten adjacency list into arrays
+    startIndeces.resize(max + 2, 0);
+    //startIndeces[0] = adjacencyList.size();
+    startIndeces[0] = NUM_NODES;
+    printf("NUM_NODES: %d\tadjListStartIndeces[0]: %d", NUM_NODES, adjacencyList.size());
+    for (int i = 1; i < max + 1; ++i)
+    {
+        startIndeces[i] = adjList.size();
+        adjList.insert(adjList.end(), adjacencyList[i].begin(), adjacencyList[i].end());
+    }
+    startIndeces[max + 1] = adjList.size();
+}
+
+// Function to get the neighbors of a given exam
+vector<int> getNeighbors(int examID, const vector<int>& adjList, const vector<int>& startIndeces)
+{
+    if (examID < 1 || examID > startIndeces[0])
+    {
+        cerr << "Error: Invalid exam ID " << examID << endl;
+        return {};
+    }
+
+    // Get neighbors range from startIndeces
+    int start = startIndeces[examID];
+    int end = startIndeces[examID + 1];
+
+    // Extract neighbors from adjList
+    vector<int> neighbors(adjList.begin() + start, adjList.begin() + end);
+    return neighbors;
+}
+
+// Cantor pairing function
+inline int cantorPair(int a, int b) {
+    if (a < b) swap(a, b); // Ensure a > b for consistency
+    return (a + b) * (a + b + 1) / 2 + b;
+}
+
+// Inverse Cantor pairing function
+pair<int, int> inverseCantor(int Z) {
+    int w = floor((sqrt(8.0 * Z + 1) - 1) / 2); // Solve for w
+    int t = (w * (w + 1)) / 2;                  // Compute triangular number
+    int b = Z - t;
+    int a = w - b;
+    return { a, b };
+}
+
+// Function to create the edge map using Cantor pairing
+void createEdgeMap(const vector<vector<int>>& studentEnrollments, unordered_map<int, int>& edgeMap) {
+    for (const auto& exams : studentEnrollments) {
+        for (size_t i = 0; i < exams.size(); ++i) {
+            for (size_t j = i + 1; j < exams.size(); ++j) {
+                int exam1 = exams[i];
+                int exam2 = exams[j];
+
+                int key = cantorPair(exam1, exam2); // Compute unique key using Cantor pairing
+
+                // Increment edge weight
+                edgeMap[key] += 1;
+            }
+        }
+    }
+}
+
+// Function to get the weight of the edge between two exams
+int getWeight(int exam1, int exam2, const unordered_map<int, int>& edgeMap) {
+    int key = cantorPair(exam1, exam2); // Compute unique key using Cantor pairing
+
+    // Check if the edge exists in the map
+    if (edgeMap.find(key) != edgeMap.end()) {
+        return edgeMap.at(key); // Return the weight
+    }
+    return 0; // Return 0 if no edge exists
+}
+
+
+
+
+
+// ---- ---- ---- ---- INITIAL SOLUTION DSATUR SOLVER
+
+// Function to find the smallest available color
+int findSmallestAvailableColor(const unordered_set<int>& neighborColors) {
+    int color = 0;
+    while (neighborColors.find(color) != neighborColors.end()) {
+        color++;
+    }
+    return color;
+}
+
+// DSATUR algorithm implementation
+vector<int> dsaturColoring(const vector<int>& adjList, const vector<int>& adjListStartIndices)
+{
+    int numNodes = adjListStartIndices[0];
+    //int numNodes = NUM_NODES;
+    vector<int> coloring(numNodes, -1); // -1 indicates uncolored
+    vector<int> saturation(numNodes, 0); // Saturation degree for each node
+    vector<int> degrees(numNodes, 0); // Degree of each node
+
+    printf("adjList: %d\tadjListStartIndices: %d\tnumNodes: %d\n", adjList.size(), adjListStartIndices.size(), numNodes);
+
+    // Calculate degrees of each node
+    for (int i = 1; i <= numNodes; ++i) 
+    {
+        //printf("%d\n", adjListStartIndices[i]);
+        degrees[i - 1] = adjListStartIndices[i + 1] - adjListStartIndices[i];
+    }
+
+    // DSATUR algorithm loop
+    while (count(coloring.begin(), coloring.end(), -1) > 0) {
+        // Find the uncolored node with the largest saturation degree, break ties by degree
+        int maxNode = -1;
+        int maxSaturation = -1;
+        int maxDegree = -1;
+
+        for (int i = 0; i < numNodes; ++i) {
+            if (coloring[i] == -1) { // Node is uncolored
+                if (saturation[i] > maxSaturation ||
+                    (saturation[i] == maxSaturation && degrees[i] > maxDegree)) {
+                    maxNode = i;
+                    maxSaturation = saturation[i];
+                    maxDegree = degrees[i];
+                }
+            }
+        }
+
+        // Find the smallest available color for the selected node
+        unordered_set<int> neighborColors;
+        for (int j = adjListStartIndices[maxNode + 1]; j < adjListStartIndices[maxNode + 2]; ++j) {
+            int neighbor = adjList[j];
+            if (coloring[neighbor - 1] != -1) 
+            {
+                neighborColors.insert(coloring[neighbor - 1]);
+            }
+        }
+        int selectedColor = findSmallestAvailableColor(neighborColors);
+        coloring[maxNode] = selectedColor;
+
+        // Update saturation degree of uncolored neighbors
+        for (int j = adjListStartIndices[maxNode + 1]; j < adjListStartIndices[maxNode + 2]; ++j) {
+            int neighbor = adjList[j];
+            if (coloring[neighbor - 1] == -1) {
+                unordered_set<int> neighborColors;
+                for (int k = adjListStartIndices[neighbor]; k < adjListStartIndices[neighbor + 1]; ++k) {
+                    int subNeighbor = adjList[k];
+                    if (coloring[subNeighbor - 1] != -1) {
+                        neighborColors.insert(coloring[subNeighbor - 1]);
+                    }
+                }
+                saturation[neighbor - 1] = neighborColors.size();
+            }
+        }
+    }
+
+    return coloring;
+}
+
+
+
+
+
+// ---- ---- ---- ---- EVALUTION OF SOLUTION
+
+// Function to calculate the cost of a given coloring solution
+double calculateCost(const vector<int>& coloring, const unordered_map<int, int>& edgeMap) {
+    double totalPenalty = 0.0;
+
+    for (const auto& entry : edgeMap) {
+        int key = entry.first;
+        int weight = entry.second;  // Number of shared students (w_ij)
+
+        // Decode Cantor-paired key to get the two exams (i, j)
+        pair<int, int> exams = inverseCantor(key);
+        int exam1 = exams.first;
+        int exam2 = exams.second;
+
+        // Get assigned time slots for these exams
+        int t_i = coloring[exam1 - 1];
+        int t_j = coloring[exam2 - 1];
+
+        // Compute time difference
+        int distance = abs(t_i - t_j);
+
+        // Apply the penalty formula only if |t_i - t_j| < 6
+        if (distance < 6) {
+            totalPenalty += weight * pow(2, 5 - distance);
+        }
+    }
+
+    return totalPenalty;
+}
+
+// print the solution on CPU
+void printSolution(vector<int> coloring) {
+    // Print coloring result
+    printf("[");
+    for (int i = 0; i < NUM_NODES - 1; i++)
+    {
+        printf("%d, ", coloring[i]);
+    }
+    printf("%d]\n", coloring[NUM_NODES - 1]);
+}
+
+//print functions for debugging
+// Function to print the adjacency list
+void printAdjacencyList(const vector<int>& adjList, const vector<int>& adjListStartIndices) {
+    cout << "\nFlattened Adjacency List:\n";
+    for (size_t i = 1; i <= adjListStartIndices[0]; ++i)
+    {
+        cout << "Exam " << (i) << " -> ";
+        for (int j = adjListStartIndices[i]; j < adjListStartIndices[i + 1]; ++j)
+        {
+            cout << (adjList[j]) << " ";
+        }
+        cout << endl;
+    }
+}
+
+
+
+
+
+// ---- ---- ---- ---- MAIN
+
+// main
+double mainExecution()
+{
+    // Start the total execution timer.
+    auto total_start = chrono::high_resolution_clock::now();
+
+    //printf("NEIGHBORHOODSIZE = %d\n", MOVE_SIZE + SWAP_SIZE);
+    //READING DATA
+    //filenames of datasets
+    //string crsFilename = "Toronto/ear-f-83.crs";
+    //string stuFilename = "Toronto/ear-f-83.stu";
+    //string crsFilename = "Toronto/hec-s-92.crs";
+    //string stuFilename = "Toronto/hec-s-92.stu";
+    //string crsFilename = "Toronto/kfu-s-93.crs";
+    //string stuFilename = "Toronto/kfu-s-93.stu";
+    //string crsFilename = "Toronto/pur-s-93.crs";
+    //string stuFilename = "Toronto/pur-s-93.stu";
+    //string crsFilename = "Toronto/rye-s-93.crs";
+    //string stuFilename = "Toronto/rye-s-93.stu";
+    string crsFilename = "Toronto/ute-s-92.crs";
+    string stuFilename = "Toronto/ute-s-92.stu";
+    //string crsFilename = "Data/yor-f-83.crs";
+    //string stuFilename = "Data/yor-f-83.stu";
+    //string crsFilename = "Data/lse-f-91.crs";
+    //string stuFilename = "Data/lse-f-91.stu";
+    //string crsFilename = "Toronto/uta-s-92.crs";
+    //string stuFilename = "Toronto/uta-s-92.stu";
+    //string crsFilename = "Data/tre-s-92.crs";
+    //string stuFilename = "Data/tre-s-92.stu";
+    //string crsFilename = "Toronto/sta-f-83.crs";
+    //string stuFilename = "Toronto/sta-f-83.stu";
+    //string crsFilename = "Toronto/tre-s-92.crs";
+    //string stuFilename = "Toronto/tre-s-92.stu";
+    //string crsFilename = "Toronto/car-f-92.crs";
+    //string stuFilename = "Toronto/car-f-92.stu";
+    //string crsFilename = "Toronto/car-s-91.crs";
+    //string stuFilename = "Toronto/car-s-91.stu";
+
+    //read data of both files
+    int maxExamID;
+    unordered_map<int, int> exams = readCrsFile(crsFilename, maxExamID);
+    vector<vector<int>> students = readStuFile(stuFilename);
+
+    printf("checkpoint 1: read data successfully\n");
+
+    // Define adjacency list storage
+    vector<int> adjList;
+    vector<int> adjListStartIndices;
+
+
+
+    //GRAPH CREATION AND COPY
+    auto graph_start = chrono::high_resolution_clock::now();
+
+    // Build the adjacency list
+    createAdjacencyList(students, maxExamID, adjList, adjListStartIndices);
+    //printAdjacencyList(adjList, adjListStartIndices);
+    printf("checkpoint 2: created adjacencylist successfully\n");
+
+    // Copy adjacency list to GPU constant memory
+    copyAdjacencyListToGPU(adjList, adjListStartIndices);
+    printf("checkpoint 3: copied adjacencylist successfully\n");
+
+    //Define edge map
+    unordered_map<int, int> edgeMap;
+
+    //Build the edge map
+    createEdgeMap(students, edgeMap);
+    printf("checkpoint 4: created edgemap successfully\n");
+
+    // Copy edge map to GPU (sorted for binary search)
+    copyEdgeMapToGPU(edgeMap);
+    printf("checkpoint 5: copied edgemap successfully\n");
+
+    auto graph_end = chrono::high_resolution_clock::now();
+    double graph_time = chrono::duration<double>(graph_end - graph_start).count();
+    //printf("Graph creation and copy time: %f seconds\n", graph_time);
+
+
+
+    //INITIAL SOLUTION CREATION AND COPY
+    auto initial_start = chrono::high_resolution_clock::now();
+
+    // Perform DSATUR graph coloring
+    vector<int> coloring = dsaturColoring(adjList, adjListStartIndices);
+    printf("checkpoint 6: created initial solution successfully\n");
+
+    // Copy coloring to GPU constant memory
+    copySolutionToGPU(coloring);
+    printf("checkpoint 7: copied initial solution successfully\n");
+
+
+
+    //INITIAL EVALUATION AND COPY
+    // Calculate cost
+    double cost = calculateCost(coloring, edgeMap);
+    printf("checkpoint 8: calculated cost successfully\n");
+
+    // Copy the cost to GPU constant memory
+    copyCostToGPU(cost);
+    printf("checkpoint 9: copied cost successfully\n");
+
+    auto initial_end = chrono::high_resolution_clock::now();
+    double initial_time = chrono::duration<double>(initial_end - initial_start).count();
+    //printf("Initial solution solver time: %f seconds\n", initial_time);
+
+
+
+    //GPU EXECTUION AND COPY BACK
+    auto gpu_start = chrono::high_resolution_clock::now();
+
+    // Execute kernel to find best solution
+    optimizeSolutionOnGPU(d_solution, d_score, d_globalCandidates, cost);
+    printf("checkpoint 10: executed GPU improvement successfully\n");
+
+    // Copy solution and score back to CPU
+    vector<int> solution = copySolutionToCpu(d_solution);
+    //printf("checkpoint 12: copied improved solution successfully\n");
+    freeMemoryGPU(d_adjList, d_adjListStartIndices, d_cantorPairs, d_weights, d_solution, d_score);
+    printf("checkpoint 11: freed memory successfully\n");
+
+    auto gpu_end = chrono::high_resolution_clock::now();
+    double gpu_time = chrono::duration<double>(gpu_end - gpu_start).count();
+    //printf("GPU local search time: %f seconds\n", gpu_time);
+
+    auto total_end = chrono::high_resolution_clock::now();
+    double total_time = chrono::duration<double>(total_end - total_start).count();
+    printf("Total execution time: %f seconds\n", total_time);
+
+    //FINAL EVALUATION
+    // Check score
+    //double newCost = calculateCost(solution, edgeMap);
+    printSolution(solution);
+
+    return total_time;
+}
+
+int main()
+{
+    double avg = 0;
+    double amount = 1;
+    for (int i = 0; i < amount; i++)
+    {
+        avg += mainExecution();
+    }
+    avg = avg / amount;
+    printf("AVG EXECUTION TIME = %f seconds", avg);
+}

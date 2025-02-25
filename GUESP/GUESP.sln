@@ -5,6 +5,8 @@ VisualStudioVersion = 16.0.30907.101
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "GUESP", "GUESP\GUESP.vcxproj", "{7FFFCAB6-7530-4040-A368-2595B3691A7C}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "GUESP_GLOBAL", "GUESP_GLOBAL\GUESP_GLOBAL.vcxproj", "{7CDED57F-E5C6-49DB-A58D-2D05BCC1C2A0}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -15,6 +17,10 @@ Global
 		{7FFFCAB6-7530-4040-A368-2595B3691A7C}.Debug|x64.Build.0 = Debug|x64
 		{7FFFCAB6-7530-4040-A368-2595B3691A7C}.Release|x64.ActiveCfg = Release|x64
 		{7FFFCAB6-7530-4040-A368-2595B3691A7C}.Release|x64.Build.0 = Release|x64
+		{7CDED57F-E5C6-49DB-A58D-2D05BCC1C2A0}.Debug|x64.ActiveCfg = Debug|x64
+		{7CDED57F-E5C6-49DB-A58D-2D05BCC1C2A0}.Debug|x64.Build.0 = Debug|x64
+		{7CDED57F-E5C6-49DB-A58D-2D05BCC1C2A0}.Release|x64.ActiveCfg = Release|x64
+		{7CDED57F-E5C6-49DB-A58D-2D05BCC1C2A0}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

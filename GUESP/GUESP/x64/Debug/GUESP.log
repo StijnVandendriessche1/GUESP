@@ -1,38 +1,29 @@
 ﻿  Compiling CUDA source file kernel.cu...
   
   C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\GUESP>"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\bin\nvcc.exe" -gencode=arch=compute_52,code=\"sm_52,compute_52\" --use-local-env -ccbin "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.28.29333\bin\HostX86\x64" -x cu   -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\include" -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\include"  -G   --keep-dir x64\Debug  -maxrregcount=0   --machine 64 --compile -cudart static  -g  -DWIN32 -DWIN64 -D_DEBUG -D_CONSOLE -D_MBCS -Xcompiler "/EHsc /W3 /nologo /Od /FS /Zi /RTC1 /MDd " -Xcompiler "/Fdx64\Debug\vc142.pdb" -o C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\GUESP\x64\Debug\kernel.cu.obj "C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\GUESP\kernel.cu" 
-C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\GUESP\kernel.cu(393): warning #177-D: variable "count" was declared but never referenced
-        int count = 0;
-            ^
-  
-  Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
-  
   kernel.cu
-  tmpxft_00000928_00000000-7_kernel.cudafe1.cpp
-C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\GUESP\kernel.cu(501): warning C4267: '=': conversion from 'size_t' to '_Ty', possible loss of data
+  tmpxft_000035bc_00000000-7_kernel.cudafe1.cpp
+C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\GUESP\kernel.cu(523): warning C4267: '=': conversion from 'size_t' to '_Ty', possible loss of data
           with
           [
               _Ty=int
           ]
-C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\GUESP\kernel.cu(504): warning C4267: '=': conversion from 'size_t' to '_Ty', possible loss of data
+C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\GUESP\kernel.cu(526): warning C4267: '=': conversion from 'size_t' to '_Ty', possible loss of data
           with
           [
               _Ty=int
           ]
-C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\GUESP\kernel.cu(507): warning C4267: '=': conversion from 'size_t' to '_Ty', possible loss of data
+C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\GUESP\kernel.cu(529): warning C4267: '=': conversion from 'size_t' to '_Ty', possible loss of data
           with
           [
               _Ty=int
           ]
-C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\GUESP\kernel.cu(536): warning C4244: 'initializing': conversion from 'double' to 'int', possible loss of data
-C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\GUESP\kernel.cu(639): warning C4267: '=': conversion from 'size_t' to '_Ty', possible loss of data
+C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\GUESP\kernel.cu(558): warning C4244: 'initializing': conversion from 'double' to 'int', possible loss of data
+C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\GUESP\kernel.cu(661): warning C4267: '=': conversion from 'size_t' to '_Ty', possible loss of data
           with
           [
               _Ty=int
           ]
-C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\GUESP\kernel.cu(750): warning C4244: 'argument': conversion from 'double' to 'const int', possible loss of data
-C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\GUESP\kernel.cu(754): warning C4244: 'argument': conversion from 'double' to 'int', possible loss of data
-C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\GUESP\kernel.cu(838): warning C4244: 'initializing': conversion from 'double' to 'int', possible loss of data
-     Creating library C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\x64\Debug\GUESP.lib and object C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\x64\Debug\GUESP.exp
-LINK : warning LNK4098: defaultlib 'LIBCMT' conflicts with use of other libs; use /NODEFAULTLIB:library
+C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\GUESP\kernel.cu(788): warning C4244: 'argument': conversion from 'double' to 'const int', possible loss of data
+C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\GUESP\kernel.cu(800): warning C4244: 'argument': conversion from 'double' to 'int', possible loss of data
   GUESP.vcxproj -> C:\Users\stijn\Documents\school\2024-2025\masterproef\final_project\GUESP\x64\Debug\GUESP.exe
